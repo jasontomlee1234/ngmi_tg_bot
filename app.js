@@ -12,15 +12,80 @@ const routerAbi = require("./routerAbi.json");
 const targetAddressJson = require("./targetAddress.json");
 
 const TelegramBot = require("node-telegram-bot-api");
+// let web4 = new Web3(process.env.WEB3_WEBSOCKET_ENDPOINT);
+let web4 = new Web3(process.env.WEB3_HTTP_ENDPOINT);
 
 const bot = new TelegramBot(process.env.TG_BOT_API_KEY, { polling: true });
 
 abiDecoder.addABI(erc20Abi);
 abiDecoder.addABI(routerAbi);
 
+async function scanBlock(blockNumber, myCache){
+  let targetAddress = myCache.get("targetAddress");
+  const block = await web4.eth.getBlock(blockNumber)
+  console.log(block.transactions)
+  console.log(targetAddress)
+  block.transactions.map(async txHash=>{
+    const tx = await web4.eth.getTransaction(txHash)
+    const receipt = await web4.eth.getTransactionReceipt(txHash)
+    try {
+      if (targetAddress.map((x) => x.address).includes(tx.from)) {
+        const target = targetAddress.filter((x) => x.address == tx.from)[0];
+
+        console.log("bingo!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+
+        const data = abiDecoder.decodeMethod(tx.input);
+        if (receipt.status && data && data.name.includes("swap")) {
+          let logs = abiDecoder.decodeLogs(receipt.logs);
+          logs = logs.filter((log) => log.name == "Transfer");
+          console.log(tx.from);
+
+          const path =
+            data.params[data.params.findIndex((x) => x.name == "path")].value;
+          const inTokenContract = new web4.eth.Contract(erc20Abi, path[0]);
+          const outTokenContract = new web4.eth.Contract(
+            erc20Abi,
+            path[path.length - 1]
+          );
+
+          const inTokenName = await inTokenContract.methods.symbol().call();
+          const outTokenName = await outTokenContract.methods.symbol().call();
+
+          const inAmount =
+            inTokenName == "USDC" || inTokenName == "fUSDT"
+              ? web4.utils.fromWei(logs[0].events[2].value, "mwei")
+              : web4.utils.fromWei(logs[0].events[2].value, "ether");
+          const outAmount =
+            outTokenName == "USDC" || outTokenName == "fUSDT"
+              ? web4.utils.fromWei(
+                  logs[logs.length - 1].events[2].value,
+                  "mwei"
+                )
+              : web4.utils.fromWei(
+                  logs[logs.length - 1].events[2].value,
+                  "ether"
+                );
+          console.log("intoken: ", inTokenName, inAmount);
+          console.log("outToken: ", outTokenName, outAmount);
+
+          const targetGroupIds = require("./groupIds.json");
+
+          for (id of targetGroupIds) {
+            bot.sendMessage(
+              id,
+              `${target.name}\n${target.address} \nsell: ${inTokenName} ${inAmount}\nbuy: ${outTokenName} ${outAmount}\nhttps://ftmscan.com/tx/${txHash}`
+            );
+          }
+        }
+      }
+    } catch (e) {
+      console.log(e);
+    }
+
+  })
+}
+
 async function main() {
-  let web3 = new Web3(process.env.WEB3_WEBSOCKET_ENDPOINT);
-  let web4 = new Web3(process.env.WEB3_HTTP_ENDPOINT);
   console.log("running...");
 
   myCache.set("targetAddress", targetAddressJson);
@@ -30,7 +95,6 @@ async function main() {
     myCache.set("targetAddress", value);
     fs.writeFileSync("./targetAddress.json", JSON.stringify(value));
     console.log("cache updated");
-    console.log(myCache.get("targetAddress"));
   });
 
   bot.on("message", (msg) => {
@@ -62,7 +126,7 @@ async function main() {
             .length != 0
         ) {
           bot.sendMessage(chatId, "address already in database");
-        } else if (!web3.utils.isAddress(tokenized[2])) {
+        } else if (!web4.utils.isAddress(tokenized[2])) {
           bot.sendMessage(chatId, "invalid address");
         } else {
           const cache = myCache.get("targetAddress");
@@ -80,7 +144,7 @@ async function main() {
             chatId,
             "invalid command i.e. /delete 0x4d9361a86d038c8ada3db2457608e2275b3e08d4"
           );
-        } else if (!web3.utils.isAddress(tokenized[1])) {
+        } else if (!web4.utils.isAddress(tokenized[1])) {
           bot.sendMessage(chatId, "invalid address");
         } else {
           console.log("before");
@@ -101,71 +165,86 @@ async function main() {
     // send a message to the chat acknowledging receipt of their message
     // bot.sendMessage(chatId, `${chatId} Received your message`);
   });
-  web3.eth.subscribe("pendingTransactions", async (error, result) => {
-    if (error) {
-      console.log(error);
-    } else {
-      // const rst = await Promise.all([web4.eth.getTransaction(result), web4.eth.getTransactionReceipt(result)])
-      // const tx = rst[0]
-      // const receipt = rst[1]
 
-      let targetAddress = myCache.get("targetAddress");
+  let currentBlockNumber = await web4.eth.getBlockNumber()
+  setInterval(async()=>{
+    const newBlockNumber = await web4.eth.getBlockNumber()
+    console.log("new block number: ",newBlockNumber)
 
-      const tx = await web4.eth.getTransaction(result);
-      const receipt = await web4.eth.getTransactionReceipt(result);
-      try {
-        if (targetAddress.map((x) => x.address).includes(tx.from)) {
-          const target = targetAddress.filter((x) => x.address == tx.from)[0];
-
-          const data = abiDecoder.decodeMethod(tx.input);
-          if (receipt.status && data && data.name.includes("swap")) {
-            let logs = abiDecoder.decodeLogs(receipt.logs);
-            logs = logs.filter((log) => log.name == "Transfer");
-            console.log(tx.from);
-
-            const path =
-              data.params[data.params.findIndex((x) => x.name == "path")].value;
-            const inTokenContract = new web4.eth.Contract(erc20Abi, path[0]);
-            const outTokenContract = new web4.eth.Contract(
-              erc20Abi,
-              path[path.length - 1]
-            );
-
-            const inTokenName = await inTokenContract.methods.symbol().call();
-            const outTokenName = await outTokenContract.methods.symbol().call();
-
-            const inAmount =
-              inTokenName == "USDC" || inTokenName == "fUSDT"
-                ? web3.utils.fromWei(logs[0].events[2].value, "mwei")
-                : web3.utils.fromWei(logs[0].events[2].value, "ether");
-            const outAmount =
-              outTokenName == "USDC" || outTokenName == "fUSDT"
-                ? web3.utils.fromWei(
-                    logs[logs.length - 1].events[2].value,
-                    "mwei"
-                  )
-                : web3.utils.fromWei(
-                    logs[logs.length - 1].events[2].value,
-                    "ether"
-                  );
-            console.log("intoken: ", inTokenName, inAmount);
-            console.log("outToken: ", outTokenName, outAmount);
-
-            const targetGroupIds = require("./groupIds.json");
-
-            for (id of targetGroupIds) {
-              bot.sendMessage(
-                id,
-                `${target.name}\n${target.address} \nsell: ${inTokenName} ${inAmount}\nbuy: ${outTokenName} ${outAmount}\nhttps://ftmscan.com/tx/${result}`
-              );
-            }
-          }
-        }
-      } catch (e) {
-        console.log(e);
+    if (newBlockNumber!=currentBlockNumber){
+      for (let i=currentBlockNumber;i<newBlockNumber;i++){
+        await scanBlock(i, myCache)
+        console.log("block: ",i," finished scanning!")
       }
+      currentBlockNumber = newBlockNumber
     }
-  });
+  },1000)
+
+  // web4.eth.subscribe("pendingTransactions", async (error, result) => {
+  //   if (error) {
+  //     console.log(error);
+  //   } else {
+  //     // const rst = await Promise.all([web4.eth.getTransaction(result), web4.eth.getTransactionReceipt(result)])
+  //     // const tx = rst[0]
+  //     // const receipt = rst[1]
+
+  //     let targetAddress = myCache.get("targetAddress");
+
+  //     const tx = await web4.eth.getTransaction(result);
+  //     const receipt = await web4.eth.getTransactionReceipt(result);
+  //     try {
+  //       if (targetAddress.map((x) => x.address).includes(tx.from)) {
+  //         const target = targetAddress.filter((x) => x.address == tx.from)[0];
+
+  //         const data = abiDecoder.decodeMethod(tx.input);
+  //         if (receipt.status && data && data.name.includes("swap")) {
+  //           let logs = abiDecoder.decodeLogs(receipt.logs);
+  //           logs = logs.filter((log) => log.name == "Transfer");
+  //           console.log(tx.from);
+
+  //           const path =
+  //             data.params[data.params.findIndex((x) => x.name == "path")].value;
+  //           const inTokenContract = new web4.eth.Contract(erc20Abi, path[0]);
+  //           const outTokenContract = new web4.eth.Contract(
+  //             erc20Abi,
+  //             path[path.length - 1]
+  //           );
+
+  //           const inTokenName = await inTokenContract.methods.symbol().call();
+  //           const outTokenName = await outTokenContract.methods.symbol().call();
+
+  //           const inAmount =
+  //             inTokenName == "USDC" || inTokenName == "fUSDT"
+  //               ? web4.utils.fromWei(logs[0].events[2].value, "mwei")
+  //               : web4.utils.fromWei(logs[0].events[2].value, "ether");
+  //           const outAmount =
+  //             outTokenName == "USDC" || outTokenName == "fUSDT"
+  //               ? web4.utils.fromWei(
+  //                   logs[logs.length - 1].events[2].value,
+  //                   "mwei"
+  //                 )
+  //               : web4.utils.fromWei(
+  //                   logs[logs.length - 1].events[2].value,
+  //                   "ether"
+  //                 );
+  //           console.log("intoken: ", inTokenName, inAmount);
+  //           console.log("outToken: ", outTokenName, outAmount);
+
+  //           const targetGroupIds = require("./groupIds.json");
+
+  //           for (id of targetGroupIds) {
+  //             bot.sendMessage(
+  //               id,
+  //               `${target.name}\n${target.address} \nsell: ${inTokenName} ${inAmount}\nbuy: ${outTokenName} ${outAmount}\nhttps://ftmscan.com/tx/${result}`
+  //             );
+  //           }
+  //         }
+  //       }
+  //     } catch (e) {
+  //       console.log(e);
+  //     }
+  //   }
+  // });
 }
 
 main();
